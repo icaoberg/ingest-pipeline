@@ -8,5 +8,9 @@ workflow_map:
   - 'collection_type': 'codex'
     'assay_type': 'CODEX'
     'workflow': 'codex_cytokit'
+  - 'collection_type': 'single_metadatatsv'
+    'assay_type': 'AF'
+    'workflow': 'generic_pyramid'
+
 
   

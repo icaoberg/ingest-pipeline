@@ -442,7 +442,10 @@ def pythonop_send_create_dataset(**kwargs) -> str:
                                      of the parent of the new dataset
     'dataset_name_callable' : called with **kwargs; returns the
                               display name of the new dataset                                     
-    'dataset_types' : the types list of the new dataset
+    'dataset_types' : a list of length one containing the type string for the new dataset
+    or
+    'dataset_type_callable' : called with **kwargs; returns the type string
+                              of the new dataset
     
     Returns the following via XCOM:
     (no key) : data_directory_path for the new dataset
@@ -450,8 +453,16 @@ def pythonop_send_create_dataset(**kwargs) -> str:
     'group_uuid' : group uuid for the created dataset
     """
     for arg in ['parent_dataset_uuid_callable', 'http_conn_id', 'endpoint',
-                'dataset_name_callable', 'dataset_types']:
+                'dataset_name_callable']:
         assert arg in kwargs, "missing required argument {}".format(arg)
+    if 'dataset_type_callable' in kwargs:
+        dataset_type = kwargs['dataset_type_callable'](**kwargs)
+    elif 'dataset_types' in kwargs:
+        assert (isinstance(kwargs['dataset_types'], list)
+                and len(kwargs['dataset_types']) == 1), 'dataset_types must have length 1'
+        dataset_type = kwargs['dataset_types'][0]
+    else:
+        raise AssertionError('dataset type not provided')
     http_conn_id = kwargs['http_conn_id']
     endpoint = kwargs['endpoint']
     
@@ -468,7 +479,7 @@ def pythonop_send_create_dataset(**kwargs) -> str:
     data = {
         "source_dataset_uuid": kwargs['parent_dataset_uuid_callable'](**kwargs),
         "derived_dataset_name": kwargs['dataset_name_callable'](**kwargs),
-        "derived_dataset_types": kwargs['dataset_types']
+        "derived_dataset_types": [dataset_type]
     }
     print('data: ')
     pprint(data)  
@@ -698,6 +709,7 @@ def downstream_workflow_iter(collectiontype: str, assay_type: str) -> Iterable[s
     collectiontype = collectiontype or ''
     assay_type = assay_type or ''
     for ct_re, at_re, workflow in _get_workflow_map():
+        print(ct_re, at_re, workflow)
         if ct_re.match(collectiontype) and at_re.match(assay_type):
             yield workflow
 
