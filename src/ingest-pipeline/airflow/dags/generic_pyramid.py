@@ -40,12 +40,37 @@ from utils import (
 
 THREADS = 6  # to be used by the CWL worker
 
-def ome_tiff_paths(dirpath : Path):
+def ome_tiff_paths(dirpath : Path) -> Iterable[Path]:
     for path in dirpath.rglob('*.ome.tiff'):
-#         with tifffile.TiffFile(path) as tf:
-#             md = xmltodict.parse(tf.ome_metadata)
-        if not 'toosmall' in str(path):
-            yield path
+        with tifffile.TiffFile(path) as tf:
+            md = xmltodict.parse(tf.ome_metadata)
+            try:
+                #pprint(md)
+                szX = int(md['ome:OME']['ome:Image']['ome:Pixels']['@SizeX'])
+                szY = int(md['ome:OME']['ome:Image']['ome:Pixels']['@SizeY'])
+            except KeyError as e:
+                try: 
+                    #pprint(md)
+                    szX = int(md['OME']['Image']['Pixels']['@SizeX'])
+                    szY = int(md['OME']['Image']['Pixels']['@SizeY'])
+                except KeyError:
+                    print(f'KeyError on {path}: {e}')
+                    pprint(md)
+                    raise
+            #print(szX, szY)
+            if szX * szY >= 1500 * 1500:
+                yield path
+            else:
+                print(f'{path} is too small to tile')
+                pass
+
+
+# def ome_tiff_paths(dirpath : Path):
+#     for path in dirpath.rglob('*.ome.tiff'):
+# #         with tifffile.TiffFile(path) as tf:
+# #             md = xmltodict.parse(tf.ome_metadata)
+#         if not 'toosmall' in str(path):
+#             yield path
 
 def gen_target_links(dag, dataset_lz_path, **kwargs):
     #path = Path('/usr/local/airflow/lz/IEC Testing Group/48c8dd2ad06aa23e36c095c9088a4913')
@@ -71,7 +96,7 @@ default_args = {
     'on_failure_callback': utils.create_dataset_state_error_callback(get_uuid_for_error)
 }
     
-def sub_dag(parent_dag_name, child_dag_name, dataset_lz_path,
+def sub_dag(parent_dag_name, child_dag_name,
             start_date, schedule_interval, **kwargs):
     dag = DAG(f'{parent_dag_name}.{child_dag_name}',
               default_args = default_args,
@@ -80,19 +105,19 @@ def sub_dag(parent_dag_name, child_dag_name, dataset_lz_path,
     gen_target_links(dag, dataset_lz_path, **kwargs)
     return dag
 
-class CustomSubDagOperator(SubDagOperator):
-    template_fields = ['dataset_lz_path']
-    @apply_defaults
-    def __init__(self,
-                 subdag_callable,
-                 dataset_lz_path,
-                 task_id,
-                 dag,
-                 *args, **kwargs) -> None:
-        super().__init__(subdag=subdag_callable(dag.dag_id, task_id, dataset_lz_path,
-                                                dag.start_date, dag.schedule_interval),
-                         task_id=task_id, dag=dag)
-        self.dataset_lz_path = dataset_lz_path
+# class CustomSubDagOperator(SubDagOperator):
+#     template_fields = ['dataset_lz_path']
+#     @apply_defaults
+#     def __init__(self,
+#                  subdag_callable,
+#                  dataset_lz_path,
+#                  task_id,
+#                  dag,
+#                  *args, **kwargs) -> None:
+#         super().__init__(subdag=subdag_callable(dag.dag_id, task_id, dataset_lz_path,
+#                                                 dag.start_date, dag.schedule_interval),
+#                          task_id=task_id, dag=dag)
+#         self.dataset_lz_path = dataset_lz_path
 
 
 
@@ -437,11 +462,25 @@ with DAG('generic_pyramid',
 #         provide_context=True
 #     )
 
-    t_sub_dag = CustomSubDagOperator(
-        subdag_callable = sub_dag,
-        dataset_lz_path='{{dag_run.conf.parent_lz_path}}',
+    def capture_path(self, **kwargs):
+        return kwargs['parent_lz_path']
+
+    t_capture_path = PythonOperator(
+        python_callable=capture_path,
+        task_id='capture_path',
+        provide_context=True,
+        op_kwargs = {
+            'parent_lz_path' : '{{dag_run.conf.parent_lz_path}}'
+            }
+        )
+
+    t_sub_dag = SubDagOperator(
+        subdag = sub_dag,
         task_id = 'workers',
-        dag = dag
+        dag = dag,
+        op_kwargs={
+            'parent_lz_path' : '{{dag_run.conf.parent_lz_path}}'
+            }
         )
 
     t_log_info = LogInfoOperator(task_id='log_info')
@@ -451,7 +490,7 @@ with DAG('generic_pyramid',
     t_set_dataset_processing = SetDatasetProcessingOperator(task_id='set_dataset_processing')
     
     (dag >> t_log_info >> t_create_tmpdir >> t_send_create_dataset >> t_set_dataset_processing
-     >> t_sub_dag >> t_join >> t_cleanup_tmpdir)
+     >> t_capture_path >> t_sub_dag >> t_join >> t_cleanup_tmpdir)
 
 #     t_move_data = MoveDataOperator(task_id='move_data')
 # 
