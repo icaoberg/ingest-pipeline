@@ -1,8 +1,6 @@
 from datetime import datetime, timedelta
-import json
 import os
 from pathlib import Path
-from pprint import pprint
 import shlex
 
 from airflow import DAG
@@ -10,7 +8,6 @@ from airflow.operators.bash_operator import BashOperator
 from airflow.operators.python_operator import PythonOperator
 from airflow.operators.python_operator import BranchPythonOperator
 from airflow.operators.dummy_operator import DummyOperator
-from airflow.hooks.http_hook import HttpHook
 from hubmap_operators.common_operators import (
     LogInfoOperator,
     JoinOperator,
@@ -22,17 +19,13 @@ from hubmap_operators.common_operators import (
 
 import utils
 from utils import (
-    decrypt_tok,
-    find_pipeline_manifests,
     get_absolute_workflows,
+    get_cwltool_bin_path,
     get_dataset_uuid,
     get_parent_dataset_uuid,
     get_uuid_for_error,
-    localized_assert_json_matches_schema as assert_json_matches_schema,
     make_send_status_msg_function,
 )
-
-import cwltool  # used to find its path
 
 THREADS = 6  # to be used by the CWL worker
 
@@ -101,14 +94,7 @@ with DAG('salmon_rnaseq_10x',
         print('tmpdir: ', tmpdir)
         data_dir = ctx['parent_lz_path']
         print('data_dir: ', data_dir)
-        cwltool_dir = os.path.dirname(cwltool.__file__)
-        while cwltool_dir:
-            part1, part2 = os.path.split(cwltool_dir)
-            cwltool_dir = part1
-            if part2 == 'lib':
-                break
-        assert cwltool_dir, 'Failed to find cwltool bin directory'
-        cwltool_dir = os.path.join(cwltool_dir, 'bin')
+        cwltool_dir = get_cwltool_bin_path()
 
         command = [
             'env',
@@ -144,14 +130,7 @@ with DAG('salmon_rnaseq_10x',
         print('tmpdir: ', tmpdir)
         data_dir = ctx['parent_lz_path']
         print('data_dir: ', data_dir)
-        cwltool_dir = os.path.dirname(cwltool.__file__)
-        while cwltool_dir:
-            part1, part2 = os.path.split(cwltool_dir)
-            cwltool_dir = part1
-            if part2 == 'lib':
-                break
-        assert cwltool_dir, 'Failed to find cwltool bin directory'
-        cwltool_dir = os.path.join(cwltool_dir, 'bin')
+        cwltool_dir = get_cwltool_bin_path()
 
         command = [
             'env',
