@@ -1,8 +1,9 @@
-import os
-import json
-import shlex
-from pprint import pprint
 from datetime import datetime, timedelta
+import json
+import os
+from pathlib import Path
+from pprint import pprint
+import shlex
 
 from airflow import DAG
 from airflow.operators.bash_operator import BashOperator
@@ -16,18 +17,19 @@ from hubmap_operators.common_operators import (
     CreateTmpDirOperator,
     CleanupTmpDirOperator,
     SetDatasetProcessingOperator,
-    MoveDataOperator
+    MoveDataOperator,
 )
 
 import utils
 from utils import (
-    PIPELINE_BASE_DIR,
+    decrypt_tok,
     find_pipeline_manifests,
+    get_absolute_workflows,
     get_dataset_uuid,
     get_parent_dataset_uuid,
     get_uuid_for_error,
     localized_assert_json_matches_schema as assert_json_matches_schema,
-    decrypt_tok
+    make_send_status_msg_function,
 )
 
 import cwltool  # used to find its path
@@ -60,8 +62,12 @@ with DAG('salmon_rnaseq_10x',
          ) as dag:
 
     pipeline_name = 'salmon-rnaseq'
-    cwl_workflow1 = os.path.join(pipeline_name, 'pipeline.cwl')
-    cwl_workflow2 = os.path.join('portal-containers', 'h5ad-to-arrow.cwl')
+    cwl_workflows = get_absolute_workflows(
+        [
+            Path(pipeline_name, 'pipeline.cwl'),
+            Path('portal-containers', 'h5ad-to-arrow.cwl'),
+        ]
+    )
 
     def build_dataset_name(**kwargs):
         return '{}__{}__{}'.format(dag.dag_id,
@@ -112,7 +118,7 @@ with DAG('salmon_rnaseq_10x',
             '--outdir',
             os.path.join(tmpdir, 'cwl_out'),
             '--parallel',
-            os.fspath(PIPELINE_BASE_DIR / cwl_workflow1),
+            os.fspath(cwl_workflows[0]),
             '--fastq_dir',
             data_dir,
             '--threads',
@@ -151,7 +157,7 @@ with DAG('salmon_rnaseq_10x',
             'env',
             'PATH=%s:%s' % (cwltool_dir, os.environ['PATH']),
             'cwltool',
-            os.fspath(PIPELINE_BASE_DIR / cwl_workflow2),
+            os.fspath(cwl_workflows[1]),
             '--input_dir',
             '.'
         ]
@@ -246,88 +252,10 @@ with DAG('salmon_rnaseq_10x',
         provide_context=True
         )
 
-    def send_status_msg(**kwargs):
-        retcode_ops = ['pipeline_exec', 'move_data', 'make_arrow1']
-        retcodes = [int(kwargs['ti'].xcom_pull(task_ids=op))
-                    for op in retcode_ops]
-        print('retcodes: ', {k:v for k, v in zip(retcode_ops, retcodes)})
-        success = all([rc == 0 for rc in retcodes])
-        derived_dataset_uuid = kwargs['ti'].xcom_pull(key='derived_dataset_uuid',
-                                                      task_ids="send_create_dataset")
-        ds_dir = kwargs['ti'].xcom_pull(task_ids='send_create_dataset')
-        http_conn_id='ingest_api_connection'
-        endpoint='/datasets/status'
-        method='PUT'
-        crypt_auth_tok = kwargs['dag_run'].conf['crypt_auth_tok']
-        headers={
-            'authorization' : 'Bearer ' + decrypt_tok(crypt_auth_tok.encode()),
-            'content-type' : 'application/json'}
-        # print('headers:')
-        # pprint(headers)  # reduce visibility of auth_tok
-        extra_options = []
-
-        http = HttpHook(method,
-                        http_conn_id=http_conn_id)
-
-        if success:
-            md = {}
-            if 'dag_provenance' in kwargs['dag_run'].conf:
-                md['dag_provenance'] = kwargs['dag_run'].conf['dag_provenance'].copy()
-                new_prv_dct = utils.get_git_provenance_dict([__file__,
-                                                             os.path.join(PIPELINE_BASE_DIR,
-                                                                          cwl_workflow1),
-                                                             os.path.join(PIPELINE_BASE_DIR,
-                                                                          cwl_workflow2)])
-                md['dag_provenance'].update(new_prv_dct)
-            else:
-                dag_prv = (kwargs['dag_run'].conf['dag_provenance_list']
-                           if 'dag_provenance_list' in kwargs['dag_run'].conf
-                           else [])
-                dag_prv.extend(utils.get_git_provenance_list([__file__,
-                                                              os.path.join(PIPELINE_BASE_DIR,
-                                                                           cwl_workflow1),
-                                                              os.path.join(PIPELINE_BASE_DIR,
-                                                                           cwl_workflow2)]))
-                md['dag_provenance_list'] = dag_prv
-
-            manifest_files = find_pipeline_manifests(
-                PIPELINE_BASE_DIR / cwl_workflow1,
-                PIPELINE_BASE_DIR / cwl_workflow2,
-            )
-            md.update(utils.get_file_metadata_dict(ds_dir,
-                                                   utils.get_tmp_dir_path(kwargs['run_id']),
-                                                   manifest_files))
-            try:
-                assert_json_matches_schema(md, 'dataset_metadata_schema.yml')
-                data = {'dataset_id' : derived_dataset_uuid,
-                        'status' : 'QA',
-                        'message' : 'the process ran',
-                        'metadata': md}
-            except AssertionError as e:
-                print('invalid metadata follows:')
-                pprint(md)
-                data = {'dataset_id' : derived_dataset_uuid,
-                        'status' : 'Error',
-                        'message' : 'internal error; schema violation: {}'.format(e),
-                        'metadata': {}}
-        else:
-            log_fname = os.path.join(utils.get_tmp_dir_path(kwargs['run_id']),
-                                     'session.log')
-            with open(log_fname, 'r') as f:
-                err_txt = '\n'.join(f.readlines())
-            data = {'dataset_id' : derived_dataset_uuid,
-                    'status' : 'Invalid',
-                    'message' : err_txt}
-        print('data: ')
-        pprint(data)
-
-        response = http.run(endpoint,
-                            json.dumps(data),
-                            headers,
-                            extra_options)
-        print('response: ')
-        pprint(response.json())
-
+    send_status_msg = make_send_status_msg_function(
+        retcode_ops=['pipeline_exec', 'move_data', 'make_arrow1'],
+        cwl_workflows=cwl_workflows,
+    )
     t_send_status = PythonOperator(
         task_id='send_status_msg',
         python_callable=send_status_msg,
